@@ -1,0 +1,1023 @@
+---
+title: "Research Question 1 - 28 May 2025"
+format: pdf
+author: "Student ID: 201901492"
+toc: false
+execute: 
+  cache: true
+number-sections: false
+bibliography: references.bib
+editor: 
+  markdown: 
+    wrap: sentence
+---
+
+# Research Question
+
+To what extent do the vehicle characteristics influence injury severity outcomes for cyclists and pedestrians involved in collisions with passenger cars?
+
+
+# Data Collection
+
+in this project, data that will be used are road safety statistics that provided publicly by the UK government (STATS19).
+The data consist of: 1.Road Safety – Vehicles 2.Road Safety – Casualties 3.Road Safety – Collisions
+
+Scope of Research use data period from 2019 to 2023.
+
+Furthermore, to obtained vehicles characteristics data (weight and dimensions), it will consider to use information based on European Environment Agency (EEA), using source code in https://github.com/itsleeds/carmatch.
+
+
+a.  Load Datasets from STATS19
+
+```{r}
+library("stats19")
+library(tidyverse)
+library("readxl")
+library("MASS")
+library("pscl")
+library("rms")
+library("brant")
+library(ROCR)
+library(marginaleffects)
+library(ggeffects)
+
+
+#define scope of research (time period)
+years <- 2020:2024
+
+#load data road safety - vehicles
+vehicles_all <-data.frame()
+for (year in years){
+  vehicles_data <- get_stats19(year = year, type = "veh")
+  vehicles_all <-bind_rows(vehicles_all, vehicles_data)
+}
+
+vehicles_selection <- vehicles_all %>%
+  dplyr::select(collision_index,
+                vehicle_reference,
+                generic_make_model,
+                vehicle_type,
+                propulsion_code,
+                engine_capacity_cc,
+                first_point_of_impact,
+                age_of_vehicle,
+                age_of_driver)
+
+#load data road safety - collisions
+collisions_all <- data.frame()
+for (year in years){
+  collisions_data <- get_stats19(year = year, type = "collision")
+  collisions_all <-bind_rows(collisions_all, collisions_data)
+}
+
+collisions_selection <- collisions_all %>%
+  dplyr::select(collision_index,
+                location_easting_osgr,
+                location_northing_osgr,
+                latitude,
+                longitude,
+                police_force,
+                speed_limit,
+                local_authority_district,
+                light_conditions,
+                weather_conditions,
+                road_surface_conditions,
+                urban_or_rural_area)
+
+#load data road safety - casualties
+casualties_all <- data.frame()
+for (year in years){
+  casualties_data <- get_stats19(year = year, type = "cas")
+  casualties_all <-bind_rows(casualties_all, casualties_data)
+}
+
+casualties_selection <- casualties_all %>% 
+  dplyr::select(collision_index,
+                vehicle_reference,
+                casualty_type,
+                casualty_severity,
+                age_of_casualty,
+                pedestrian_location,)
+```
+
+b.  Load dataset vehicles spesification such as weight and dimension based on European Environment Agency (EEA), using source code in https://github.com/ITSLeeds/carmatch
+
+```{r}
+#load dataset vehicle classification and spesification
+source("https://github.com/ITSLeeds/carmatch/raw/main/R/carmatch.R")
+d_raw = d_raw_euco2 <- readRDS("C:/Users/ACER/Documents/d_raw_euco2.Rds")
+d_raw2 = d_raw |> 
+  mutate(generic_make_model = paste(Make, Commercial_name))
+
+
+#column selection
+veh_char <- d_raw2 %>% 
+  dplyr::select(Mass_kg,
+                Wheelbase,
+                SteeringAxle,
+                OtherAxle,
+                Engine_capacity,
+                Engine_power,
+                Fuel_type,
+                generic_make_model)
+
+veh_char <- veh_char %>%
+  distinct(Engine_capacity, Fuel_type, generic_make_model, .keep_all = TRUE) %>%
+  rename(propulsion_code = Fuel_type,
+         engine_capacity_cc = Engine_capacity) %>%
+  mutate(propulsion_code = tolower(propulsion_code))
+
+veh_char1 <- veh_char %>%
+  group_by(generic_make_model) %>%
+  slice(1) %>%  # only first row that will be used
+  ungroup() %>%
+  dplyr::select(-propulsion_code, -engine_capacity_cc)
+```
+
+c. load dataset from vehicle type according to Euro Ncap
+
+```{r}
+#load dataset vehicle classification and spesification after combining manually
+f <- "D:/Github/crashSeverity/Data/Raw/Vehicles_class.xlsx"
+
+category_vehicles <- read_excel(f)
+
+```
+
+#Data Preprocessing
+
+```{r}
+#filling missing data on generic_make model with value in the same accident index
+vehicles_selection <- vehicles_selection %>%
+  group_by(collision_index) %>%
+  mutate(generic_make_model = ifelse(generic_make_model == "Data missing or out of range", 
+                                     first(na.omit(generic_make_model)), 
+                                     generic_make_model)) %>%
+  ungroup() %>%
+  mutate(propulsion_code = tolower(propulsion_code)) %>%
+  group_by(generic_make_model) %>%
+  mutate(propulsion_code = ifelse(propulsion_code == "undefined", 
+                                  first(na.omit(propulsion_code)), 
+                                  propulsion_code)) %>%
+  ungroup() %>%
+  group_by(generic_make_model) %>%
+  mutate(engine_capacity_cc = ifelse(is.na(engine_capacity_cc), 
+                                     first(na.omit(engine_capacity_cc)), 
+                                     engine_capacity_cc)) %>%
+  ungroup() %>%
+  mutate(propulsion_code = ifelse(propulsion_code == "heavy oil", "diesel", propulsion_code)) %>%
+  mutate(propulsion_code = ifelse(propulsion_code == "hybrid electric", "petrol/electric", propulsion_code)) %>%
+  filter(generic_make_model != "Data missing or out of range")
+
+
+#join vehicles_all dan veh_char
+vehicles_joined1 <- left_join(vehicles_selection, veh_char,
+                            by = c("generic_make_model", "propulsion_code", "engine_capacity_cc"))
+vehicles_joined1_succeed <- vehicles_joined1 %>% drop_na(Mass_kg)
+
+#select failed join due to different character but similar potential meaning 
+vehicles_failed_rows <- vehicles_joined1 %>%
+  filter(is.na(Mass_kg)) %>%
+  mutate(model_key = str_extract(generic_make_model, "[A-Z\\s]+\\d*")) %>%
+  dplyr::select(-Mass_kg, -SteeringAxle, -Wheelbase, -OtherAxle, -Engine_power)
+
+veh_char_norm <- veh_char %>%
+  mutate(model_key = str_extract(generic_make_model, "[A-Z\\s]+\\d*"))
+
+veh_char_norm_unique <- veh_char_norm %>%
+  group_by(model_key, propulsion_code, engine_capacity_cc) %>%
+  slice(1) %>%
+  ungroup()
+
+vehicles_joined2 <- left_join(vehicles_failed_rows, veh_char_norm_unique,
+                           by = c("model_key", "propulsion_code", "engine_capacity_cc"),
+                           suffix = c("", ".new")) %>%
+                           dplyr::select(-model_key, -generic_make_model.new)
+
+vehicles_joined2_succeed <- vehicles_joined2 %>% drop_na(Mass_kg)
+
+vehicles_failed2_rows <- vehicles_joined2 %>%
+  filter(is.na(Mass_kg)) %>%
+  dplyr::select(-Mass_kg, -SteeringAxle, -Wheelbase, -OtherAxle, -Engine_power)
+                           
+vehicles_joined3_succeed <- left_join(vehicles_failed2_rows, veh_char1,
+                                      by = c("generic_make_model")) %>%
+  drop_na(Mass_kg)
+
+vehicles_all_char <- bind_rows(vehicles_joined1_succeed, vehicles_joined2_succeed, vehicles_joined3_succeed)
+
+#joining column vehicle_category on vehicles_all_char to get vehicle class and rating VRU
+vehicles_all_char <- left_join(vehicles_all_char, category_vehicles, by = "generic_make_model")
+
+#filter casualties only 0 (pedestrian) and 1 (cyclist)
+casualties_filtered <- casualties_selection %>% filter(casualty_type %in% c("Pedestrian", "Cyclist"))
+
+#join data casualty and vehicles based on accident index+vehicle reference
+casualties_vehicle <- left_join(casualties_filtered, vehicles_all_char,
+                              by = c("collision_index", "vehicle_reference"))
+
+#join data casualty_vehicle and collision to get speed limit as predictor
+veh_cas_coll <- left_join(casualties_vehicle, collisions_selection,
+                          by = c("collision_index"))
+veh_cas_coll <- veh_cas_coll %>% drop_na(generic_make_model)
+veh_cas_coll <- veh_cas_coll %>% filter(vehicle_class != "Truck")
+
+#simplified weather variable
+veh_cas_coll$weather <- case_when(
+  veh_cas_coll$weather_conditions %in% c("Fine no high winds", "Fine + high winds") ~ "Fine",
+  veh_cas_coll$weather_conditions %in% c("Raining no high winds", "Raining + high winds") ~ "Raining",
+  veh_cas_coll$weather_conditions %in% c("Snowing no high winds", "Snowing + high winds") ~ "Snowing",
+  veh_cas_coll$weather_conditions == "Fog or mist" ~ "Fog",
+  veh_cas_coll$weather_conditions %in% c("Other", "Unknown") ~ NA
+)
+
+#simplified road_surface_conditions variable
+veh_cas_coll$road_surface <-veh_cas_coll$road_surface_conditions
+veh_cas_coll$road_surface <- case_when(
+  veh_cas_coll$road_surface %in% c("Data missing or out of range", "unknown (self reported)") ~ NA,
+  TRUE ~ veh_cas_coll$road_surface
+)
+
+veh_cas_coll$speed_limit <- case_when(
+  veh_cas_coll$speed_limit %in% c("Data missing or out of range") ~ NA,
+  TRUE ~ veh_cas_coll$speed_limit
+)
+
+#convert to factor in dependent variable (y)
+veh_cas_coll$casualty_severity <- factor(veh_cas_coll$casualty_severity, 
+                                           levels = c("Slight", "Serious", "Fatal"), 
+                                           ordered = TRUE)
+
+
+#convert to factor in independent variable (x)
+veh_cas_coll$speed_limit <- factor(veh_cas_coll$speed_limit,
+                                   levels = c("20","30", "40", "50", "60", "70"),
+                                   ordered = FALSE)
+veh_cas_coll$weather <- factor(veh_cas_coll$weather)
+veh_cas_coll$road_surface <- factor(veh_cas_coll$road_surface)
+veh_cas_coll$vehicle_class <- factor(veh_cas_coll$vehicle_class)
+
+#scalling data independent variable
+veh_cas_coll$Mass_kg10   <- veh_cas_coll$Mass_kg / 10
+veh_cas_coll$SteeringAxle10 <- veh_cas_coll$SteeringAxle / 10
+veh_cas_coll$Wheelbase10 <- veh_cas_coll$Wheelbase / 10
+
+veh_cas_coll$Mass_kg100   <- veh_cas_coll$Mass_kg / 100
+veh_cas_coll$SteeringAxle100 <- veh_cas_coll$SteeringAxle / 100
+veh_cas_coll$Wheelbase100 <- veh_cas_coll$Wheelbase / 100
+
+
+veh_cas_coll$Mass_kg250 <- veh_cas_coll$Mass_kg / 250
+veh_cas_coll$engine_capacity100 <- veh_cas_coll$engine_capacity_cc / 100
+
+
+veh_cas_coll <- veh_cas_coll %>%
+  mutate(age_of_vehicle = ifelse(age_of_vehicle == -1, NA, age_of_vehicle))
+
+
+```
+
+# Initial analysis
+Initial analysis was conducted to obtain appropriate statistical testing. Firstly, ordinal logistic regression was considered to use with some reason:
+1.Dependent variable that will be examined is casualty severity which has categorical data.
+2.The severity consists of slight, serious, and fatal.
+3.This category will be changed to factor in the following step to rank based on lower impact to the highest
+
+```{r}
+count_casualty <- veh_cas_coll %>%
+  count(casualty_severity) %>%
+  mutate(prop = round(n / sum(n) * 100, 2))
+
+#proportional odds in model
+model_olr1 <- polr(casualty_severity ~ vehicle_class + Rating_VRU + speed_limit + Mass_kg,
+                  data = veh_cas_coll,
+                  Hess = TRUE)
+
+brant(model_olr1)
+
+```
+The amount of data used, particularly casualty_severity in Fatal Condition was very low (1.57%) will may suffer on instability and unreliable data.
+Furthermore, result from brant-test (proportional odds test) indicated violations of the proportional odds assumption for several predictors, implying that the effect of these variables is not consistent across the severity levels. which means that increased probability from slight to serious differ with serious to fatal.
+Given this limitation, further analysis will merge serious injury and fatal categories into single group labelled as killed/serious injury  (KSI).
+then using binary logistic regression in statistical testing.
+Consequently, binary logistic regression is applied for subsequent statistical analysis. 
+In addition to this consideration, this study also aligns with the Vision Zero strategy adopted in the UK, which aims to eliminate all traffic fatalities and serious injuries. Under this framework, fatal and serious injuries are considered a unified target group, without distinction between them.
+
+
+```{r}
+#adjustment on casualty_severity become binary slight = 0 and serious/fatal= 1
+veh_cas_coll$ksi_severity <- ifelse(veh_cas_coll$casualty_severity == "Slight", 0, 1)
+```
+
+# Exploratory data analysis
+This stage was conducted to explore about type of data and spread of data of independent variable 
+```{r}
+#check proportion of categorical data
+
+# 1. speed limit category
+veh_cas_coll %>%
+  count(speed_limit) %>%
+  mutate(percent = n/sum(n)*100)
+
+#combine group >=40
+veh_cas_coll <- veh_cas_coll %>%
+  mutate(speed_limit = as.numeric(as.character(speed_limit)),
+         speed_group = case_when(
+           speed_limit == 20 ~ "Low",
+           speed_limit == 30 ~ "Medium",
+           speed_limit >= 40 ~ "High",
+           TRUE ~ NA_character_
+         )) %>%
+  mutate(speed_group = factor(speed_group, levels = c("Low", "Medium", "High")))
+
+#check distribution based on KSI severity (dependent category)
+veh_cas_coll %>%
+  group_by(speed_group,ksi_severity) %>%
+  summarise(n = n()) %>%
+  mutate(prop = n / sum(n))
+
+# 2. road surface
+veh_cas_coll %>%
+  count(road_surface) %>%
+  mutate(percent = n/sum(n)*100)
+
+#combine group, become binary dry vs non dry
+veh_cas_coll <- veh_cas_coll %>%
+  mutate(road_surface_group = case_when(
+    road_surface == "Dry" ~ "Dry",
+    road_surface %in% c("Wet or damp", "Frost or ice", "Snow", "Flood over 3cm. deep") ~ "Non-dry",
+    TRUE ~ NA_character_
+  )) %>%
+  mutate(road_surface_group = factor(road_surface_group, levels = c("Dry", "Non-dry")))
+
+#check distribution based on KSI severity (dependent category)
+veh_cas_coll %>%
+  group_by(road_surface_group,ksi_severity) %>%
+  summarise(n = n()) %>%
+  mutate(prop = n / sum(n))
+
+# 3. weather
+veh_cas_coll %>%
+  count(weather) %>%
+  mutate(percent = n/sum(n)*100)
+
+#combine group, become binary Fine vs not fine
+veh_cas_coll <- veh_cas_coll %>%
+  mutate(weather_group = case_when(
+    weather == "Fine" ~ "Fine",
+    weather %in% c("Raining", "Fog", "Snowing") ~ "Not fine",
+    TRUE ~ NA_character_
+  )) %>%
+  mutate(weather_group = factor(weather_group, levels = c("Fine", "Not fine")))
+
+#check distribution based on KSI severity (dependent category)
+veh_cas_coll %>%
+  group_by(weather_group,ksi_severity) %>%
+  summarise(n = n()) %>%
+  mutate(prop = n / sum(n))
+
+# 4. light conditions
+veh_cas_coll %>%
+  count(light_conditions) %>%
+  mutate(percent = n/sum(n)*100)
+
+#combine category, become daylight vs darkness,
+veh_cas_coll <- veh_cas_coll %>%
+  mutate(
+    light_group = case_when(
+      light_conditions == "Daylight" ~ "Daylight",
+      light_conditions %in% c("Darkness - lights lit","Darkness - no lighting", "Darkness - lights unlit") ~ "Darkness",
+      light_conditions %in% c(
+        "Data missing or out of range", 
+        "Darkness - lighting unknown"
+      ) ~ NA_character_,
+      TRUE ~ NA_character_
+    )
+  )
+
+#check distribution based on KSI severity (dependent category)
+veh_cas_coll %>%
+  group_by(light_group,ksi_severity) %>%
+  summarise(n = n()) %>%
+  mutate(prop = n / sum(n))
+
+# 5. first point of impact
+veh_cas_coll %>%
+  count(first_point_of_impact) %>%
+  mutate(percent = n/sum(n)*100)
+
+#delete other useless category,
+veh_cas_coll <- veh_cas_coll %>%
+  mutate(impact_group = case_when(
+    first_point_of_impact == "Front" ~ "Front",
+    first_point_of_impact == "Nearside" ~ "Nearside",
+    first_point_of_impact == "Offside" ~ "Offside",
+    first_point_of_impact == "Back" ~ "Back",
+    TRUE ~ NA_character_
+  )) %>%
+  mutate(impact_group = factor(impact_group, levels = c("Front", "Nearside", "Offside", "Back")))
+
+#check distribution based on KSI severity (dependent category)
+veh_cas_coll %>%
+  group_by(impact_group,ksi_severity) %>%
+  summarise(n = n()) %>%
+  mutate(prop = n / sum(n))
+
+# 6. urban / rural area
+veh_cas_coll %>%
+  count(urban_or_rural_area) %>%
+  mutate(percent = n/sum(n)*100)
+
+#define category into urban or rural only,
+veh_cas_coll <- veh_cas_coll %>%
+  mutate(urban_rural = ifelse(
+    urban_or_rural_area %in% c("Unallocated", "Data missing or out of range"),
+    NA,
+    urban_or_rural_area
+  ))
+
+# check outlier of independent variable with continuous data
+# 7. Mass vehicle
+ggplot(veh_cas_coll, aes(y = Mass_kg250)) +
+  geom_boxplot() +
+  theme_minimal()
+
+#replace outlier of Mass_kg with NA
+veh_cas_coll <- veh_cas_coll %>%
+  mutate(
+    Mass_kg_raw = Mass_kg250,
+    Mass_kg250 = ifelse(
+      Mass_kg250 < quantile(Mass_kg_raw, 0.25, na.rm = TRUE) - 1.5 * IQR(Mass_kg_raw, na.rm = TRUE) |
+        Mass_kg250 > quantile(Mass_kg_raw, 0.75, na.rm = TRUE) + 1.5 * IQR(Mass_kg_raw, na.rm = TRUE),
+      NA,
+      Mass_kg_raw
+    )
+  )
+
+# 8. Rating VRU
+ggplot(veh_cas_coll, aes(y = Rating_VRU)) +
+  geom_boxplot() +
+  theme_minimal()
+
+#replace outlier of Rating VRU with NA
+veh_cas_coll <- veh_cas_coll %>%
+  mutate(
+    Rating_VRU_raw = Rating_VRU,
+    Rating_VRU = ifelse(
+      Rating_VRU < quantile(Rating_VRU_raw, 0.25, na.rm = TRUE) - 1.5 * IQR(Rating_VRU_raw, na.rm = TRUE) |
+        Rating_VRU > quantile(Rating_VRU_raw, 0.75, na.rm = TRUE) + 1.5 * IQR(Rating_VRU_raw, na.rm = TRUE),
+      NA,
+      Rating_VRU_raw
+    )
+  )
+
+# 9. Engine_power
+ggplot(veh_cas_coll, aes(y = Engine_power)) +
+  geom_boxplot() +
+  theme_minimal()
+
+#replace outlier of Engine_power with NA
+veh_cas_coll <- veh_cas_coll %>%
+  mutate(
+    Engine_power_raw = Engine_power,
+    Engine_power = ifelse(
+      Engine_power < quantile(Engine_power_raw, 0.25, na.rm = TRUE) - 1.5 * IQR(Engine_power_raw, na.rm = TRUE) |
+        Engine_power > quantile(Engine_power_raw, 0.75, na.rm = TRUE) + 1.5 * IQR(Engine_power_raw, na.rm = TRUE),
+      NA,
+      Engine_power_raw
+    )
+  )
+
+# 10. engine_capacity_cc
+ggplot(veh_cas_coll, aes(y = engine_capacity100)) +
+  geom_boxplot() +
+  theme_minimal()
+
+#replace outlier of engine_capacity_cc with NA
+veh_cas_coll <- veh_cas_coll %>%
+  mutate(
+    engine_capacity_cc_raw = engine_capacity100,
+    engine_capacity100 = ifelse(
+      engine_capacity100 < quantile(engine_capacity_cc_raw, 0.25, na.rm = TRUE) - 1.5 * IQR(engine_capacity_cc_raw, na.rm = TRUE) |
+        engine_capacity100 > quantile(engine_capacity_cc_raw, 0.75, na.rm = TRUE) + 1.5 * IQR(engine_capacity_cc_raw, na.rm = TRUE),
+      NA,
+      engine_capacity_cc_raw
+    )
+  )
+
+# 11. age of vehicle
+ggplot(veh_cas_coll, aes(y = age_of_vehicle)) +
+  geom_boxplot() +
+  theme_minimal()
+
+#replace outlier of age of vehicle with NA
+veh_cas_coll <- veh_cas_coll %>%
+  mutate(
+    age_of_vehicle_raw = age_of_vehicle,
+    age_of_vehicle = ifelse(
+      age_of_vehicle < quantile(age_of_vehicle_raw, 0.25, na.rm = TRUE) - 1.5 * IQR(age_of_vehicle_raw, na.rm = TRUE) |
+        age_of_vehicle > quantile(age_of_vehicle_raw, 0.75, na.rm = TRUE) + 1.5 * IQR(age_of_vehicle_raw, na.rm = TRUE),
+      NA,
+      age_of_vehicle_raw
+    )
+  )
+
+# 12. age_of_casualty
+ggplot(veh_cas_coll, aes(y = age_of_casualty)) +
+  geom_boxplot() +
+  theme_minimal()
+
+# Checking NA values in each variable
+na_summary <- veh_cas_coll %>%
+  summarise(
+    speed_group         = sum(is.na(speed_group)),
+    road_surface_group  = sum(is.na(road_surface_group)),
+    weather_group       = sum(is.na(weather_group)),
+    light_group         = sum(is.na(light_group)),
+    impact_group        = sum(is.na(impact_group)),
+    urban_rural         = sum(is.na(urban_rural)),
+    Mass_kg             = sum(is.na(Mass_kg)),
+    Rating_VRU          = sum(is.na(Rating_VRU)),
+    Engine_power        = sum(is.na(Engine_power)),
+    engine_capacity_cc  = sum(is.na(engine_capacity_cc)),
+    age_of_vehicle      = sum(is.na(age_of_vehicle)),
+    age_of_casualty     = sum(is.na(age_of_casualty))
+  ) %>%
+  pivot_longer(everything(), names_to = "variable", values_to = "na_count") %>%
+  mutate(
+    total_rows = nrow(veh_cas_coll),
+    percent_na = round(100 * na_count / total_rows, 2)
+  ) %>%
+  dplyr::select(variable, na_count, percent_na)
+
+
+```
+
+```{r}
+# decision independent variable : not using age_of_vehicle and engine_power due to higher proportion of NA (> 20%)
+veh_cas_clean <- veh_cas_coll %>% drop_na(
+  Rating_VRU, Mass_kg250, engine_capacity100,
+  age_of_casualty,
+  speed_group, light_group, weather_group, road_surface_group,impact_group,urban_rural
+)
+```
+
+
+# Determine Model Variable
+Assessment is conducted to understand the influence of vehicle and road characteristics.
+as consequently, model is built based on theory some of factors influencing casualty severity among pedestrian and cyclists as follows:
+Model 2 - Vehicle + Road feature + Confounding Factors
+Model was built as influence of that features
+1. Model 0 - confounding factors
+2. Model 1 - Model 0 + Vehicle -> Confounding + vehicle
+3. Model 2 - Model 1 + Road -> Confounding + vehicle + road
+
+
+```{r}
+#Model 0 - multivariate binary logistic variable (confounding factor)
+model_multi_con <- glm(
+  ksi_severity ~  age_of_casualty +
+                  light_group+weather_group+road_surface_group+impact_group+urban_rural,
+  data = veh_cas_clean,
+  family = "binomial"
+)
+
+exp(coef(model_multi_con)) 
+
+summary(model_multi_con)
+
+#evaluate model using pseudo R-squared
+pR2(model_multi_con)
+
+#evaluation of model 0
+AIC(model_multi_con)
+
+#evaluation on AUC indicator
+prob1 <- predict(model_multi_con, newdata = veh_cas_clean, type = "response")
+valid_idx <- !is.na(prob1)
+pred <- prediction(prob1[valid_idx], veh_cas_clean$ksi_severity[valid_idx])
+perf <- performance(pred, "auc")
+auc_value1 <- as.numeric(perf@y.values)
+print(auc_value1)
+
+#plot odds ratio
+model_summary0 <- summary(model_multi_con)
+coef_table0 <- model_summary0$coefficients
+
+num_predictor0 <- length(coef(model_multi_con))  
+coef_table0 <- coef_table0[1:num_predictor0, , drop = FALSE]
+
+# calculation of Odds Ratio
+estimates_OR0   <- coef_table0[,"Estimate"]
+std_error0      <- coef_table0[,"Std. Error"]
+Odds_Ratio0     <- exp(estimates_OR0)
+lower_CI0  <- exp(estimates_OR0 - 1.96 * std_error0)
+upper_CI0  <- exp(estimates_OR0 + 1.96 * std_error0)
+  
+# create dataframe for ploting to ggplot
+plot_df0 <- data.frame(
+  variable    = rownames(coef_table0),
+  Odds_Ratio  = Odds_Ratio0,
+  lower       = lower_CI0,
+  upper       = upper_CI0
+)
+
+plot_df0$variable <- factor(plot_df0$variable, 
+                             levels = rownames(coef_table0))
+
+var_labels0 <- c(
+  "(Intercept)" = "Intercept",
+  "age_of_casualty" = "Age of Casualty",
+  "light_groupDaylight" = "Daylight",
+  "weather_groupNot fine" = "Weather: Not Fine",
+  "road_surface_groupNon-dry" = "Road Surface: Non-dry",
+  "impact_groupNearside" = "Impact: Nearside",
+  "impact_groupOffside" = "Impact: Offside",
+  "impact_groupBack" = "Impact: Back",
+  "urban_ruralUrban" = "Urban Area"
+)
+
+# Ganti kolom variable dengan label
+plot_df0$variable <- recode(plot_df0$variable, !!!var_labels)
+
+# Plot ulang
+ggplot(plot_df0, aes(x = Odds_Ratio, y = variable)) +
+  geom_point(size = 2) +  # titik lebih besar
+  geom_errorbarh(aes(xmin = lower, xmax = upper), height = 0.25, size = 1) + # error bar lebih tebal
+  geom_vline(xintercept = 1, linetype = "dashed", color = "red", size = 1) + # garis merah lebih tebal
+  scale_x_log10() +
+  labs(
+    title = "Odds Ratio Plot (Multivariate Binary Logistic Regression)",
+    x = "Odds Ratio",
+    y = "Predictors"
+  ) +
+  theme_minimal(base_size = 14) + # ukuran font dasar lebih besar
+  theme(
+    axis.text = element_text(color = "black", face = "bold"),   # teks sumbu lebih tebal
+    axis.title = element_text(color = "black", face = "bold"),  # judul sumbu lebih tebal
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 16) # judul ke tengah, tebal
+  )
+
+```
+
+```{r}
+#Model 1 - multivariate binary logistic variable (confounding factor + vehicle)
+model_multi_veh <- glm(
+  ksi_severity ~  Rating_VRU+ Mass_kg250+engine_capacity100+
+                  age_of_casualty +
+                  light_group+weather_group+road_surface_group+impact_group+urban_rural,
+  data = veh_cas_clean,
+  family = "binomial"
+)
+
+exp(coef(model_multi_veh)) 
+
+summary(model_multi_veh)
+
+#evaluate model using pseudo R-squared
+pR2(model_multi_veh)
+
+#evaluation of model 2 to compare with another model
+AIC(model_multi_veh)
+
+#evaluation on AUC indicator
+prob2 <- predict(model_multi_veh, newdata = veh_cas_clean, type = "response")
+valid_idx <- !is.na(prob2)
+pred <- prediction(prob2[valid_idx], veh_cas_clean$ksi_severity[valid_idx])
+perf <- performance(pred, "auc")
+auc_value2 <- as.numeric(perf@y.values)
+print(auc_value2)
+
+
+#plot odds ratio
+model_summary1 <- summary(model_multi_veh)
+coef_table1 <- model_summary1$coefficients
+
+num_predictor1 <- length(coef(model_multi_veh))  
+coef_table1 <- coef_table1[1:num_predictor1, , drop = FALSE]
+
+# calculation of Odds Ratio
+estimates_OR1   <- coef_table1[,"Estimate"]
+std_error1      <- coef_table1[,"Std. Error"]
+Odds_Ratio1     <- exp(estimates_OR1)
+lower_CI1  <- exp(estimates_OR1 - 1.96 * std_error1)
+upper_CI1  <- exp(estimates_OR1 + 1.96 * std_error1)
+  
+# create dataframe for ploting to ggplot
+plot_df1 <- data.frame(
+  variable    = rownames(coef_table1),
+  Odds_Ratio  = Odds_Ratio1,
+  lower       = lower_CI1,
+  upper       = upper_CI1
+)
+
+plot_df1$variable <- factor(plot_df1$variable, 
+                             levels = rownames(coef_table1))
+
+var_labels <- c(
+  "(Intercept)" = "Intercept",
+  "Rating_VRU" = "VRU Safety Rating",
+  "Mass_kg250" = "Vehicle Weight (per 250 kg)",
+  "engine_capacity100" = "Engine Capacity (per 100 cc)",
+  "age_of_casualty" = "Age of Casualty",
+  "light_groupDaylight" = "Daylight",
+  "weather_groupNot fine" = "Weather: Not Fine",
+  "road_surface_groupNon-dry" = "Road Surface: Non-dry",
+  "impact_groupNearside" = "Impact: Nearside",
+  "impact_groupOffside" = "Impact: Offside",
+  "impact_groupBack" = "Impact: Back",
+  "urban_ruralUrban" = "Urban Area"
+)
+
+# Ganti kolom variable dengan label
+plot_df1$variable <- recode(plot_df1$variable, !!!var_labels)
+
+# Plot ulang
+ggplot(plot_df1, aes(x = Odds_Ratio, y = variable)) +
+  geom_point(size = 2) +  # titik lebih besar
+  geom_errorbarh(aes(xmin = lower, xmax = upper), height = 0.25, size = 1) + # error bar lebih tebal
+  geom_vline(xintercept = 1, linetype = "dashed", color = "red", size = 1) + # garis merah lebih tebal
+  scale_x_log10() +
+  labs(
+    title = "Odds Ratio Plot (Multivariate Binary Logistic Regression)",
+    x = "Odds Ratio",
+    y = "Predictors"
+  ) +
+  theme_minimal(base_size = 14) + # ukuran font dasar lebih besar
+  theme(
+    axis.text = element_text(color = "black", face = "bold"),   # teks sumbu lebih tebal
+    axis.title = element_text(color = "black", face = "bold"),  # judul sumbu lebih tebal
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 16) # judul ke tengah, tebal
+  )
+```
+
+```{r}
+#Model 2 - multivariate binary logistic variable (confounding factor + vehicle + environment)
+model_multi_veh_road <- glm(
+  ksi_severity ~  Rating_VRU+ Mass_kg250+engine_capacity100+
+                  speed_group+
+                  age_of_casualty +
+                  light_group+weather_group+road_surface_group+impact_group+urban_rural,,
+  data = veh_cas_clean,
+  family = "binomial"
+)
+
+exp(coef(model_multi_veh_road)) 
+
+summary(model_multi_veh_road)
+
+#evaluate model using pseudo R-squared
+pR2(model_multi_veh_road)
+
+#evaluation of model 3 to compare with another model
+AIC(model_multi_veh_road)
+
+#evaluation on AUC indicator
+prob3 <- predict(model_multi_veh_road, newdata = veh_cas_clean, type = "response")
+valid_idx <- !is.na(prob3)
+pred <- prediction(prob3[valid_idx], veh_cas_clean$ksi_severity[valid_idx])
+perf <- performance(pred, "auc")
+auc_value3 <- as.numeric(perf@y.values)
+print(auc_value3)
+```
+
+#Model Performance
+contribution of adding independent variable
+```{r}
+pR2_values <- c(
+  model0 = pR2(model_multi_con)["McFadden"],
+  model1 = pR2(model_multi_veh)["McFadden"],
+  model2 = pR2(model_multi_veh_road)["McFadden"]
+)
+
+AIC_values <- c(
+  model0 = AIC(model_multi_con),
+  model1 = AIC(model_multi_veh),
+  model2 = AIC(model_multi_veh_road)
+)
+
+AUC_value <- c(
+  model0 = auc_value1,
+  model1 = auc_value2,
+  model2 = auc_value3
+)
+
+comparison_table <- data.frame(
+  Model_0 = c(pR2(model_multi_con)["McFadden"], AIC(model_multi_con), auc_value1),
+  Model_1 = c(pR2(model_multi_veh)["McFadden"], AIC(model_multi_veh), auc_value2),
+  Model_2 = c(pR2(model_multi_veh_road)["McFadden"], AIC(model_multi_veh_road), auc_value3)
+)
+
+rownames(comparison_table) <- c("McFadden R²", "AIC", "AUC")
+
+print(comparison_table)
+
+```
+
+Model Diagnostics
+```{r}
+# Convergence
+model_multi_veh_road$converged
+
+# multi collinearity
+vif_values <- vif(model_multi_veh_road)
+
+# Ubah menjadi dataframe
+vif_df <- data.frame(
+  Variable = names(vif_values),
+  VIF = as.numeric(vif_values),
+  row.names = NULL
+)
+vif_df
+```
+
+#Model Interpretation
+visualization:
+```{r}
+#plot odds ratio
+model_summary <- summary(model_multi_veh_road)
+coef_table <- model_summary$coefficients
+
+num_predictor <- length(coef(model_multi_veh_road))  
+coef_table <- coef_table[1:num_predictor, , drop = FALSE]
+
+# calculation of Odds Ratio
+estimates_OR   <- coef_table[,"Estimate"]
+std_error      <- coef_table[,"Std. Error"]
+Odds_Ratio     <- exp(estimates_OR)
+lower_CI  <- exp(estimates_OR - 1.96 * std_error)
+upper_CI  <- exp(estimates_OR + 1.96 * std_error)
+  
+# create dataframe for ploting to ggplot
+plot_df <- data.frame(
+  variable    = rownames(coef_table),
+  Odds_Ratio  = Odds_Ratio,
+  lower       = lower_CI,
+  upper       = upper_CI
+)
+
+plot_df$variable <- factor(plot_df$variable, 
+                             levels = rownames(coef_table))
+
+var_labels <- c(
+  "(Intercept)" = "Intercept",
+  "Rating_VRU" = "VRU Safety Rating",
+  "Mass_kg250" = "Vehicle Weight (per 250 kg)",
+  "engine_capacity100" = "Engine Capacity (per 100 cc)",
+  "speed_groupMedium" = "Speed Limit: Medium",
+  "speed_groupHigh" = "Speed Limit: High",
+  "age_of_casualty" = "Age of Casualty",
+  "light_groupDaylight" = "Daylight",
+  "weather_groupNot fine" = "Weather: Not Fine",
+  "road_surface_groupNon-dry" = "Road Surface: Non-dry",
+  "impact_groupNearside" = "Impact: Nearside",
+  "impact_groupOffside" = "Impact: Offside",
+  "impact_groupBack" = "Impact: Back",
+  "urban_ruralUrban" = "Urban Area"
+)
+
+# Ganti kolom variable dengan label
+plot_df$variable <- recode(plot_df$variable, !!!var_labels)
+
+# Plot ulang
+ggplot(plot_df, aes(x = Odds_Ratio, y = variable)) +
+  geom_point(size = 2) +  # titik lebih besar
+  geom_errorbarh(aes(xmin = lower, xmax = upper), height = 0.25, size = 1) + # error bar lebih tebal
+  geom_vline(xintercept = 1, linetype = "dashed", color = "red", size = 1) + # garis merah lebih tebal
+  scale_x_log10() +
+  labs(
+    title = "Odds Ratio Plot (Multivariate Binary Logistic Regression)",
+    x = "Odds Ratio",
+    y = "Predictors"
+  ) +
+  theme_minimal(base_size = 14) + # ukuran font dasar lebih besar
+  theme(
+    axis.text = element_text(color = "black", face = "bold"),   # teks sumbu lebih tebal
+    axis.title = element_text(color = "black", face = "bold"),  # judul sumbu lebih tebal
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 16) # judul ke tengah, tebal
+  )
+```
+
+convert to probability of each variable
+```{r}
+#Speed limit
+# AME for categorical variable
+ame_speed <- avg_comparisons(
+  model_multi_veh_road,
+  variables = "speed_group",
+  vcov = "HC3"
+)
+summary(ame_speed)
+
+ame_med_high <- avg_comparisons(
+  model_multi_veh_road,
+  variables = list(speed_group = c("Medium", "High")),
+  vcov = "HC3"
+)
+summary(ame_med_high)
+
+eff_speed <- ggpredict(model_multi_veh_road, terms = "speed_group")
+pred_df <- data.frame(
+  speed_group = eff_speed$x,
+  prob = eff_speed$predicted,
+  conf.low = eff_speed$conf.low,
+  conf.high = eff_speed$conf.high
+  )
+
+ame_df <- data.frame(
+  from = c("Low", "Low", "Medium"),
+  to   = c("Medium", "High", "High"),
+  ame  = c(
+    ame_speed$estimate[ame_speed$contrast == "Medium - Low"],
+    ame_speed$estimate[ame_speed$contrast == "High - Low"],
+    ame_med_high$estimate[ame_med_high$contrast == "High - Medium"]
+  )
+)
+pred_df$speed_group <- factor(pred_df$speed_group,
+                              levels = c("High", "Low", "Medium"))
+
+ame_plot <- ame_df %>%
+  left_join(pred_df, by = c("from" = "speed_group")) %>%
+  rename(prob_from = prob,
+         conf.low_from = conf.low,
+         conf.high_from = conf.high) %>%
+  left_join(pred_df, by = c("to" = "speed_group")) %>%
+  rename(prob_to = prob,
+         conf.low_to = conf.low,
+         conf.high_to = conf.high)
+
+ame_plot <- ame_plot %>%
+  mutate(
+    xmid = (as.numeric(from) + as.numeric(to)) / 2,
+    ymid = (prob_from + (prob_from + ame)) / 2
+  )
+
+ggplot(pred_df, aes(x = speed_group, y = prob)) +
+  geom_errorbar(aes(ymin = conf.low, ymax = conf.high), width = 0.1, size=1) +
+  geom_point(size = 4, color = "steelblue") +
+  # Panah AME
+  geom_curve(data = ame_plot,
+             aes(x = from, xend = to,
+                 y = prob_from,
+                 yend = prob_from + ame),
+             curvature = 0.2, arrow = arrow(length = unit(0.02, "npc")),
+             color = "darkred", inherit.aes = FALSE, size=1) +
+  # Label AME
+  geom_text(data = ame_plot,
+          aes(x = xmid,
+              y = ymid,
+              label = paste0("+", round(ame*100, 1), " pp")),
+          vjust = -0.5, color = "darkred", inherit.aes = FALSE)+
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
+  labs(
+    x = "Speed Limit Category",
+    y = "Predicted Probability of KSI",
+    title = "Predicted Probability & Marginal Effects of Speed Limit",
+  ) +
+  theme_minimal(base_size = 14)+
+  theme(
+    plot.title    = element_text(hjust = 0.5, face = "bold", size = 16, color = "black"),
+    axis.title    = element_text(face = "bold", size = 14, color = "black"),
+    axis.text     = element_text(size = 12, color = "black"),
+    panel.grid    = element_line(color = "grey80")  # grid tetap abu2 biar lembut
+  )
+
+
+
+```
+
+```{r}
+# average marginal effects for continous variables
+ame_rating <- avg_slopes(
+  model_multi_veh_road,
+  variables = c("Rating_VRU"),
+  vcov = "HC3"  # robust SE
+)
+summary(ame_rating)
+# VRU Rating
+eff_rating <- ggpredict(model_multi_veh_road, terms = "Rating_VRU")
+plot(eff_rating) +
+  labs(
+    x = "VRU Safety Rating",
+    y = "Predicted Probability of KSI",
+    title = "Predicted Probability of KSI on Vehicle Rating",
+  )+
+  theme(
+    plot.title    = element_text(hjust = 0.5, face = "bold", size = 16, color = "black"),
+    axis.title    = element_text(face = "bold", size = 14, color = "black"),
+    axis.text     = element_text(size = 12, color = "black"),
+    panel.grid    = element_line(color = "grey80")  # grid tetap abu2 biar lembut
+  )
+  
+```
+
+#weighted model based for RQ3
+```{r}
+p_speed = max(ame_df$ame)
+p_vru = abs(ame_rating$estimate)
+
+#weighted model based each variable
+w_speed = p_speed/(p_speed+p_vru)
+w_vru = p_vru/(p_speed+p_vru)
+
+```
