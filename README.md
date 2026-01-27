@@ -19,7 +19,9 @@ Injury severity was modelled as a binary logistic regression. To assess the incr
 
 # Repository Structure
 The repository is organised into data, scripts, and results to support a transparent and reproducible statistical analysis pipeline.
+
 crashSeverity/
+
 ├── Data/        # Raw and processed datasets used in the analysis
 
 ├── Script/      # Reproducible R scripts for data processing and modelling
