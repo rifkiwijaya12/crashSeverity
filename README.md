@@ -2,20 +2,16 @@
 Statistical analysis of factors associated with injury severity in pedestrian and cyclist crashes
 
 # Background
-Road traffic crashes remain a major public health and transport safety challenge worldwide, with pedestrians and cyclists consistently experiencing a disproportionate burden of severe and fatal injuries.
-As countries increasingly promote active travel to support sustainable and healthy mobility, ensuring safe road environments for vulnerable road users has become a critical policy objective.
-
-From a road safety perspective, injury severity in pedestrian and cyclist crashes is not solely determined by user behaviour, but is strongly influenced by system-level factors, particularly vehicle and road characteristics.
-Within the Safe System approach, vehicles and road infrastructure are designed to mitigate the consequences of human error by reducing impact forces and exposure to high-risk conflict situations.
-Understanding how these factors interact to influence injury severity is therefore essential to inform effective interventions in vehicle design and road infrastructure planning.
+Advancing active mobility has increasingly become a cornerstone of sustainable urban mobility agendas.
+However, many cities face significant challenge in realizing a safer environment for active travel, largely due to a lack of evidence-based regulations regarding the factors that contribute to severe cyclist injuries, particularly in contexts where detailed collision data are unavailable.
+This study examines the influence of vehicle and road characteristics on cyclist injury severity outcomes in collisions involving passenger cars.
 
 # Research Question
-How do vehicle and road characteristics influence injury severity outcomes for pedestrians and cyclists involved in collisions with passenger cars?
+How do vehicle and road characteristics influence injury severity outcomes for cyclists involved in collisions with passenger cars?
 
 # Methodology
-This study uses secondary dataset from road safety UK's statistics (STATS19) from 2020 to 2024, to examine injury seerity outcomes among pedestrians and cyclists. In addition, to expand vehicle characteristics, Euro NCAP and European Environment Agency data was included. Key explanatory variables were derived from vehicles, road, and situational conditions variables at the time of the crash.
-
-Injury severity was modelled as a binary logistic regression. To assess the incremental contribution of different factor groups, a series of nested models was estimated, beginning with confounding factors and subsequently adding vehicle- and road-related characteristics. Model performance and robustness were evaluated using standard diagnostic (multicollinearity assessment) and comparison metrics (psedo R-square, AIC) while results were interpreted through odds ratios and marginal effects to support data driven policy insights.
+The analysis utilised police-reported road collision records from the United Kingdom STATS19 database covering the period 2019 - 2023.
+A multivariate binary logistic regression model was employed to estimate the probability of killed or seriously injured (KSI) outcomes, by utilizing odds ratios for significance testing and average marginal effects for probability interpretation.
 
 # Repository Structure
 The repository is organised into data, scripts, and results to support a transparent and reproducible statistical analysis pipeline.
